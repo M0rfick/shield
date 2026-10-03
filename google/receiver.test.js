@@ -1,0 +1,47 @@
+// Pure receiver rules, no real spreadsheet writes. Run with Node.js.
+const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');
+const code=fs.readFileSync(path.join(__dirname,'../google/Attendance.gs'),'utf8');
+const sandbox={Date,Set,Utilities:{formatDate:d=>d.toISOString().slice(0,10)}};
+vm.createContext(sandbox);vm.runInContext(code,sandbox);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'Headers.gs'),'utf8'),sandbox);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'Clear.gs'),'utf8'),sandbox);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'Batch.gs'),'utf8'),sandbox);
+const f=sandbox;
+const row=Array(22).fill('');
+const blocks=[{date:'2026-10-01',start:2,end:7},{date:'2026-10-02',start:7,end:12},
+ {date:'2026-10-05',start:12,end:17},{date:'2026-10-06',start:17,end:22}];
+row[2]='З';row[3]='З';row[7]='З';row[12]='З';
+assert.equal(f.countDaysWithZ_(row,blocks,'2026-10-01','З'),3);
+assert.equal(f.countDaysWithZ_(row,blocks,'2026-10-06','З'),4);
+assert.equal(f.countDaysWithZ_(row,blocks,'2026-10-06','Н'),3);
+assert.equal(f.countDaysWithZ_(row,blocks,'2026-11-01','З'),1);
+const request={name:'Иванов Иван',date:'2026-10-02',period:2,mark:'Б',attested:false,subjects:['ОАП']};
+assert.throws(()=>f.validateRequest_(request),/подтверждение/);
+f.validateRequest_({...request,attested:true});
+assert.throws(()=>f.validateBatchRequest_({...request,names:['Иванов Иван'],lessons:[{period:2,subject:'ОАП',subgroup:0}]}),/подтверждение/);
+assert.throws(()=>f.validateBatchRequest_({...request,attested:true,names:[],lessons:[{period:2,subject:'ОАП',subgroup:0}]}),/Выберите/);
+assert.throws(()=>f.validateBatchRequest_({...request,attested:true,names:['Иванов Иван','иванов иван'],lessons:[{period:2,subject:'ОАП',subgroup:0}]}),/дважды/);
+assert.throws(()=>f.validateRequest_({...request,mark:'О',attested:true}),/Недопустимая/);
+assert.throws(()=>f.validateRequest_({...request,mark:'Н',date:'2026-02-31'}),/Неверная дата/);
+assert(f.subjectMatches_('Мат апп','Матем. аппарат в отр. ИТ'));
+assert(f.subjectMatches_('БПЛА 07','МДК.07.01 Оператор беспилотных авиационных систем'));
+assert(!f.subjectMatches_('ОАП','История России'));
+const dates=Array(12).fill('');dates[2]=new Date('2026-10-01T00:00:00Z');dates[7]=new Date('2026-10-02T00:00:00Z');
+const result=f.dateBlocks_(dates,'Europe/Moscow');assert.equal(result[0].end-result[0].start,5);
+assert.equal(result[1].date,'2026-10-02');
+assert(f.constantEqual_('abc','abc'));assert(!f.constantEqual_('abc','ab'));
+// Requests without the secret or an allowed username stop before touching Sheets.
+sandbox.PropertiesService={getScriptProperties:()=>({getProperty:key=>({SHARED_SECRET:'secret',ALLOWED_USERNAMES:'ivan_morfick,zxcwenty,shcherbakov_23'})[key]})};
+sandbox.LockService={getScriptLock:()=>({hasLock:()=>false})};
+sandbox.ContentService={MimeType:{JSON:'json'},createTextOutput:text=>({setMimeType:()=>JSON.parse(text)})};
+const post=data=>f.doPost({postData:{contents:JSON.stringify(data)}});
+assert.match(post({secret:'wrong',username:'ivan_morfick'}).error,/Нет доступа/);
+assert.match(post({secret:'secret',username:'unknown'}).error,/не назначен/);
+assert.match(post({secret:'secret',username:'Shcherbakov_23',action:'unknown'}).error,/Неизвестное действие/);
+assert.equal(f.monthDays_('2026-11-02')[0],'2026-11-02');
+assert.equal(f.monthDays_('2026-11-30').at(-1),'2026-11-30');
+assert.equal(f.monthDays_('2026-11-02').length,25);
+assert.deepEqual(Array.from(f.headerSubjects_([{period:4,subject:'Ин.яз в ПД',subgroup:2},{period:4,subject:'Ин.яз в ПД',subgroup:1},{period:1,subject:'ОАП',subgroup:0}])),['ОАП','','','Ин.яз 1 / Ин.яз 2','']);
+assert.throws(()=>f.validateHeaders_({date:'2026-11-01',lessons:[{period:1,subject:'ОАП',subgroup:0}]}),/воскресений/);
+assert.throws(()=>f.validateHeaders_({date:'2026-11-02',lessons:[{period:6,subject:'ОАП',subgroup:0}]}),/пять пар/);
+console.log('Проверки Google-приёмника пройдены: 3 разных дня, справки, даты, предметы.');
