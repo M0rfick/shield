@@ -1,0 +1,7 @@
+# Only runtime source files enter the image. Credentials and state stay outside.
+*
+!Dockerfile
+!.dockerignore
+!bot.py
+!attendance.py
+!schedule.py

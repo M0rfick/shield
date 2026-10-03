@@ -1,0 +1,7 @@
+__pycache__/
+state.json
+state.tmp
+.env
+.env.*
+!.env.example
+*.log
