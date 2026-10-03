@@ -52,6 +52,7 @@ ctx.tgLoadSchedule_=()=>({start:'2026-10-05',lessons:[],hasGroup:false});assert.
 // Site schema, cancellation, duplicate rows and cache use.
 const siteCtx={Date,Set,console,PropertiesService:{getScriptProperties:()=>props},Utilities:{formatDate:()=> '04.10 12:00'}};
 vm.createContext(siteCtx);vm.runInContext(fs.readFileSync(path.join(__dirname,'Telegram.gs'),'utf8'),siteCtx);
+const apiFn=siteCtx.tgApi_;
 const dataRow={'SPGRUP.NAIM':'26290911/3112',DAT:'2026-10-05T00:00:00',UR:'1','SPPRED.NAIM':'ОАП',IDGG:'0',ZAM:'0',AUD:'305'};
 const sourceRows=[dataRow,dataRow,{...dataRow,ZAM:'2'},{...dataRow,'SPGRUP.NAIM':'other'},{...dataRow,UR:'2',IDGG:'1'}];
 siteCtx.XmlService={parse:()=>({getRootElement:()=>({getName:()=> 'dataroot',getAttribute:()=>({getValue:()=> '2026-09-28T12:07:45'}),getChildren:()=>sourceRows.map(row=>({getChildText:k=>row[k]}))})})};
@@ -63,10 +64,12 @@ siteCtx.tgLoadSchedule_(3,false);assert.equal(fetched,1);siteCtx.tgLoadSchedule_
 siteCtx.UrlFetchApp.fetch=()=>({getResponseCode:()=>200,getContentText:()=> '<!DOCTYPE x><x/>'});assert.throws(()=>siteCtx.tgLoadSchedule_(3,true),/Неподдерживаемый/);
 // Failed trigger creation never advertises an enabled cloud runtime.
 values.TELEGRAM_BOT_TOKEN='test-only';values.TG_ENABLED='false';
-siteCtx.tgApi_=()=>({});siteCtx.ScriptApp={getProjectTriggers:()=>[],newTrigger:()=>({timeBased:()=>({everyMinutes:()=>({create:()=>{throw new Error('Trigger rejected');}})})})};
+siteCtx.tgApi_=()=>({});siteCtx.ScriptApp={requireAllScopes:()=>{},AuthMode:{FULL:'FULL'},getProjectTriggers:()=>[],newTrigger:()=>({timeBased:()=>({everyMinutes:()=>({create:()=>{throw new Error('Trigger rejected');}})})})};
 assert.throws(()=>siteCtx.enableCloudBot(),/Trigger rejected/);assert.equal(values.TG_ENABLED,'false');
 // Receiver adapter consumes ContentService TextOutput and surfaces errors.
 siteCtx.doPost=e=>({getContent:()=>{const request=JSON.parse(e.postData.contents);assert.equal(request.action,'roster');return JSON.stringify({ok:true,names:['Test']});}});
 assert.equal(siteCtx.tgSheet_('roster','allowed',{date:'2026-10-05'}).names[0],'Test');
 siteCtx.doPost=()=>({getContent:()=>JSON.stringify({ok:false,error:'Limit rejected'})});assert.throws(()=>siteCtx.tgSheet_('roster','allowed',{}),/Limit rejected/);
+siteCtx.UrlFetchApp.fetch=()=>{throw new Error('Required script.external_request https://api.telegram.org/botprivate-test-token/getMe private-test-token');};
+assert.throws(()=>apiFn('getMe',{},'private-test-token'),e=>e.message.includes('script.external_request')&&!e.message.includes('private-test-token')&&!e.message.includes('https://'));
 console.log('Cloud checks passed: multi/single marks, clearing, evidence, date rollover, large Unicode sessions, identities, polling offsets, stale years.');

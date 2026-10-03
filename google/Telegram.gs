@@ -5,6 +5,7 @@ const TG_DATE=['Сегодня','Завтра','Вчера','Другая дат
 const TG_REASONS=['Н — без уважительной причины','Б — справка','З — заявление','О — объяснительная','Отмена'];
 
 function configureCloudBot() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   const p=PropertiesService.getScriptProperties();
   if(!p.getProperty('SPREADSHEET_ID')||!p.getProperty('SHARED_SECRET')||!p.getProperty('ALLOWED_USERNAMES'))
     throw new Error('Сначала подключите таблицу функцией configure.');
@@ -23,6 +24,7 @@ function configureCloudBot() {
 }
 
 function enableCloudBot() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   const p=PropertiesService.getScriptProperties();
   if(!p.getProperty('TELEGRAM_BOT_TOKEN'))throw new Error('Сначала выполните configureCloudBot.');
   if(tgApi_('getWebhookInfo',{}).url)throw new Error('У бота настроен webhook. Сначала проверьте другое подключение.');
@@ -78,6 +80,7 @@ function cloudBotStatus() {
 
 /** Read-only connection check: never changes attendance or consumes updates. */
 function checkCloudBot() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   const identity=tgApi_('getMe',{});
   if(identity.username!=='Schedule3112bot')throw new Error('Настроен токен другого бота.');
   const date=tgAddDay_(tgToday_(),1),snapshot=tgSnapshot_(date,true);
@@ -86,12 +89,22 @@ function checkCloudBot() {
   console.log(JSON.stringify({bot:identity.username,date,lessons:tgLessons_(snapshot,date).length,students:roster.names.length,attendanceChanged:false}));
 }
 
+/** Official Google authorization link for editors whose popup was blocked. */
+function requestCloudAuthorization() {
+  const info=ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+  console.log(info.getAuthorizationStatus()===ScriptApp.AuthorizationStatus.REQUIRED
+    ?info.getAuthorizationUrl():'Все разрешения Google предоставлены.');
+}
+
 function tgApi_(method,payload,token) {
   token=token||PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
   if(!token)throw new Error('Токен бота не настроен.');
   let response;
   try {response=UrlFetchApp.fetch('https://api.telegram.org/bot'+token+'/'+method,{method:'post',contentType:'application/json',payload:JSON.stringify(payload),muteHttpExceptions:true});}
-  catch(error){throw new Error('Не удалось подключиться к Telegram.');}
+  catch(error){
+    const detail=String(error.message||'').split(token).join('[ключ скрыт]').replace(/https?:\/\/[^\s)]+/g,'[адрес скрыт]').slice(0,300);
+    throw new Error('Не удалось подключиться к Telegram. '+detail);
+  }
   let result;try {result=JSON.parse(response.getContentText());}catch(error){throw new Error('Telegram вернул неверный ответ.');}
   if(!result.ok) {
     if(result.error_code===409)throw new Error('Работает другая копия бота. Остановите её перед облачным запуском.');
