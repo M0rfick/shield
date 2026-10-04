@@ -1,6 +1,6 @@
 /** Free cloud runtime. No token in source. Uses the existing attendance receiver. */
 const TG_GROUP='26290911/3112';
-const TG_MAIN=[['Сегодня','Завтра'],['Выбрать дату','Выбрать подгруппу'],['Отметить пропуск','Убрать отметку'],['Обновить']];
+const TG_MAIN=[['Сегодня','Завтра'],['Вся неделя'],['Выбрать дату','Выбрать подгруппу'],['Отметить пропуск','Убрать отметку'],['Обновить']];
 const TG_DATE=['Сегодня','Завтра','Вчера','Другая дата','Отмена'];
 const TG_REASONS=['Н — без уважительной причины','Б — справка','З — заявление','О — объяснительная','Отмена'];
 
@@ -29,7 +29,7 @@ function enableCloudBot() {
   if(!p.getProperty('TELEGRAM_BOT_TOKEN'))throw new Error('Сначала выполните configureCloudBot.');
   if(tgApi_('getWebhookInfo',{}).url)throw new Error('У бота настроен webhook. Сначала проверьте другое подключение.');
   tgApi_('getMe',{});
-  tgApi_('setMyCommands',{commands:[['start','Главное меню'],['date','Выбрать дату'],['today','Сегодня'],['tomorrow','Завтра'],['miss','Отметить пропуск'],['clear','Убрать отметку'],['cancel','Отмена'],['subgroup','Выбрать подгруппу']].map(x=>({command:x[0],description:x[1]}))});
+  updateBotCommands();
   p.setProperty('TG_ENABLED','false');
   ScriptApp.getProjectTriggers().filter(x=>x.getHandlerFunction()==='pollTelegram').forEach(x=>ScriptApp.deleteTrigger(x));
   if(!p.getProperty('TG_OFFSET'))p.setProperty('TG_OFFSET','0');
@@ -161,7 +161,8 @@ function checkCloudBot() {
   const date=tgAddDay_(tgToday_(),1),snapshot=tgSnapshot_(date,true);
   const username=(PropertiesService.getScriptProperties().getProperty('ALLOWED_USERNAMES')||'').split(',')[0];
   const roster=tgSheet_('roster',username,{date});
-  console.log(JSON.stringify({bot:identity.username,date,lessons:tgLessons_(snapshot,date).length,students:roster.names.length,attendanceChanged:false}));
+  const week=tgRenderWeek_(date,0);
+  console.log(JSON.stringify({bot:identity.username,date,lessons:tgLessons_(snapshot,date).length,students:roster.names.length,weekStart:tgWeekStart_(date),weekTextLength:week.length,weekReply:week.length<=4096?'text':'document',attendanceChanged:false}));
 }
 
 /** Official Google authorization link for editors whose popup was blocked. */
@@ -175,7 +176,10 @@ function tgApi_(method,payload,token) {
   token=token||PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
   if(!token)throw new Error('Токен бота не настроен.');
   let response;
-  try {response=UrlFetchApp.fetch('https://api.telegram.org/bot'+token+'/'+method,{method:'post',contentType:'application/json',payload:JSON.stringify(payload),muteHttpExceptions:true});}
+  const options={method:'post',muteHttpExceptions:true};
+  if(method==='sendDocument'&&payload.document&&typeof payload.document==='object')options.payload=payload;
+  else {options.contentType='application/json';options.payload=JSON.stringify(payload);}
+  try {response=UrlFetchApp.fetch('https://api.telegram.org/bot'+token+'/'+method,options);}
   catch(error){
     const detail=String(error.message||'').split(token).join('[ключ скрыт]').replace(/https?:\/\/[^\s)]+/g,'[адрес скрыт]').slice(0,300);
     throw new Error('Не удалось подключиться к Telegram. '+detail);
@@ -198,6 +202,20 @@ function tgSend_(chat,text,rows) {
     tgApi_('sendMessage',{chat_id:chat,text:text.slice(0,end),reply_markup:keyboard,link_preview_options:{is_disabled:true}});
     text=text.slice(end).replace(/^\n/,'');
   }
+}
+
+/** Weekly schedules are always one Telegram message, never split or truncated. */
+function tgSendWeek_(chat,text,start) {
+  const keyboard={keyboard:TG_MAIN.map(row=>row.map(text=>({text}))),resize_keyboard:true};
+  if(text.length<=4096)return tgApi_('sendMessage',{chat_id:chat,text,reply_markup:keyboard,link_preview_options:{is_disabled:true}});
+  const document=Utilities.newBlob(text,'text/plain; charset=utf-8','Расписание-'+start+'.txt');
+  return tgApi_('sendDocument',{chat_id:String(chat),document,caption:'Расписание на неделю '+tgDateLabel_(start)+' — '+tgDateLabel_(tgAddDay_(start,6)),reply_markup:JSON.stringify(keyboard)});
+}
+
+/** Refresh the menu without changing the active connection or polling offset. */
+function updateBotCommands() {
+  tgApi_('setMyCommands',{commands:[['start','Главное меню'],['date','Выбрать дату'],['today','Сегодня'],['tomorrow','Завтра'],['week','Вся неделя одним сообщением'],['miss','Отметить пропуск'],['clear','Убрать отметку'],['cancel','Отмена'],['subgroup','Выбрать подгруппу']].map(x=>({command:x[0],description:x[1]}))});
+  console.log('Команды обновлены: /week — вся неделя одним сообщением.');
 }
 
 function tgReadState_(key) {
@@ -304,6 +322,29 @@ function tgRenderDay_(date,subgroup,force) {
   lines.push('Проверено: '+snapshot.fetched+' МСК','https://polytech-shedule.ru');return lines.join('\n');
 }
 
+function tgWeekStart_(date){return tgAddDay_(date,-((new Date(date+'T12:00:00Z').getUTCDay()+6)%7));}
+function tgRenderWeek_(date,subgroup) {
+  const start=tgWeekStart_(date),end=tgAddDay_(start,6),lines=['Расписание: '+tgDateLabel_(start)+' — '+tgDateLabel_(end),'Группа '+TG_GROUP];
+  if(subgroup)lines.push('Подгруппа '+subgroup);
+  let snapshot=null;
+  for(let i=0;i<7;i++) {
+    const day=tgAddDay_(start,i);lines.push('',tgDateLabel_(day));
+    try {
+      if(!snapshot||snapshot.start>day||day>=tgAddDay_(snapshot.start,14))snapshot=tgSnapshot_(day,false);
+      const lessons=snapshot.lessons.filter(x=>x.date===day&&(!subgroup||x.subgroup===0||x.subgroup===subgroup));
+      if(!lessons.length)lines.push('Занятий нет.');
+      for(const x of lessons) {
+        lines.push(x.period+' пара — '+x.subject+(x.subgroup?' · подгр. '+x.subgroup:''));
+        const details=[x.teacher,x.room?'ауд. '+x.room:'',({Э:'Энгельса',П:'Приморский',О:'Онлайн'})[x.campus]||x.campus].filter(Boolean);
+        if(details.length)lines.push(details.join(' · '));
+        if(['1','3'].includes(x.change))lines.push(x.change==='1'?'Изменение в расписании':'Консультация (к)');
+        if(x.note)lines.push(x.note);
+      }
+    }catch(error){lines.push(String(error.message||'Не удалось получить расписание.'));}
+  }
+  lines.push('','https://polytech-shedule.ru');return lines.join('\n');
+}
+
 function tgHandle_(m,state) {
   const text=m.text.trim(),lower=text.toLowerCase(),parts=text.split(/\s+/),command=parts[0].split('@')[0].toLowerCase(),arg=text.slice(parts[0].length).trim(),chat=m.chat.id,auth=tgAuth_(m.from);
   if(['/start','/help'].includes(command)){state.pending=null;state.scheduleDate=false;tgSend_(chat,'Расписание и посещаемость группы '+TG_GROUP+'.\nВыберите дату и пару, затем одного или нескольких студентов и причину.\n«Убрать отметку» очищает выбранную отметку.\n'+(PropertiesService.getScriptProperties().getProperty('TG_MODE')==='webhook'?'Сообщения поступают напрямую из Telegram.':'Облачная версия проверяет сообщения примерно раз в минуту.'),TG_MAIN);return;}
@@ -319,6 +360,10 @@ function tgHandle_(m,state) {
   if(command==='/subgroup'||lower==='выбрать подгруппу'){tgSend_(chat,'Выберите подгруппу:',[['Вся группа'],['Подгруппа 1','Подгруппа 2'],['Назад']]);return;}
   if(['вся группа','подгруппа 1','подгруппа 2'].includes(lower)){state.subgroup=lower==='вся группа'?0:Number(lower.slice(-1));tgSend_(chat,'Выбрано: '+(state.subgroup?'подгруппа '+state.subgroup:'вся группа'),TG_MAIN);return;}
   if(lower==='назад'){tgSend_(chat,'Выберите действие:',TG_MAIN);return;}
+  if(command==='/week'||lower==='вся неделя') {
+    const date=arg&&command==='/week'?tgParseDate_(arg):tgToday_();state.scheduleDate=false;
+    tgSendWeek_(chat,tgRenderWeek_(date,state.subgroup),tgWeekStart_(date));return;
+  }
   if((command==='/date'&&!arg)||lower==='выбрать дату'){state.scheduleDate=true;tgDatePicker_(chat);return;}
   const day=command==='/today'?'Сегодня':command==='/tomorrow'?'Завтра':command==='/date'?arg:['/refresh','обновить'].includes(lower)?'Сегодня':text;
   const date=tgParseDate_(day);state.scheduleDate=false;tgSend_(chat,tgRenderDay_(date,state.subgroup,['/refresh','обновить'].includes(lower)),TG_MAIN);

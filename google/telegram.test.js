@@ -5,6 +5,7 @@ const props={getProperty:k=>values[k]??null,setProperty:(k,v)=>{assert(Buffer.by
 const ctx={Date,Set,console,PropertiesService:{getScriptProperties:()=>props},Utilities:{formatDate:d=>d.toISOString().slice(0,10)},normalize_:v=>String(v||'').toLowerCase().replace(/ё/g,'е').replace(/\s+/g,' ').trim()};
 vm.createContext(ctx);vm.runInContext(fs.readFileSync(path.join(__dirname,'Telegram.gs'),'utf8'),ctx);
 const snapshotFn=ctx.tgSnapshot_;
+const weekSendFn=ctx.tgSendWeek_;
 ctx.tgToday_=()=> '2026-10-04';
 ctx.tgSend_=(chat,text,rows)=>sent.push({chat,text,rows});
 const lesson={date:'2026-10-05',period:1,subject:'ОАП',subgroup:0};
@@ -35,6 +36,22 @@ state=newState();begin(state);message(state,'Иванов Иван');message(sta
 state=newState();message(state,'/clear');message(state,'Завтра');message(state,'1 пара — ОАП');message(state,'Иванов Иван');assert.equal(sheetCalls.at(-1).action,'clear_prepare');
 message(state,'Подтвердить запись');assert.equal(sheetCalls.at(-1).action,'clear_prepare');message(state,'Подтвердить удаление');assert.equal(sheetCalls.at(-1).action,'clear_commit');
 assert.equal(ctx.tgAuth_({id:42,username:'newname'}),'allowed');assert.equal(ctx.tgAuth_({id:77,username:'allowed'}),'');
+// One weekly reply includes Monday through Sunday and respects subgroup selection.
+ctx.tgSendWeek_=(chat,text,start)=>sent.push({chat,text,start});
+state=newState();state.subgroup=1;const weekBefore=sent.length;message(state,'/week 05.10.2026');
+assert.equal(sent.length,weekBefore+1);assert.equal(sent.at(-1).start,'2026-10-05');
+assert(sent.at(-1).text.includes('Пн, 05.10.2026'));assert(sent.at(-1).text.includes('Вс, 11.10.2026'));assert(sent.at(-1).text.includes('ОАП'));
+ctx.tgSnapshot_=()=>({start:'2026-10-05',lessons:[lesson,{...lesson,subject:'Other subgroup',subgroup:2}]});
+message(state,'/week 08.10.2026');assert(!sent.at(-1).text.includes('Other subgroup'));
+assert.equal(ctx.tgWeekStart_('2027-01-02'),'2026-12-28');
+ctx.tgSnapshot_=()=>{throw new Error('Расписание не опубликовано.');};
+assert(ctx.tgRenderWeek_('2026-10-05',0).includes('не опубликовано'));assert(!ctx.tgRenderWeek_('2026-10-05',0).includes('Занятий нет.'));
+ctx.tgSnapshot_=()=>({start:'2026-10-05',hasGroup:true,lessons:[lesson]});
+let weekApi=[];ctx.tgApi_=(method,payload)=>weekApi.push({method,payload});
+ctx.Utilities.newBlob=(text,type,name)=>({text,type,name});
+weekSendFn(1,'а'.repeat(4096),'2026-10-05');assert.equal(weekApi.length,1);assert.equal(weekApi[0].method,'sendMessage');
+const longWeek='😀'.repeat(2049);weekSendFn(1,longWeek,'2026-10-05');assert.equal(weekApi.length,2);assert.equal(weekApi[1].method,'sendDocument');assert.equal(weekApi[1].payload.document.text,longWeek);
+ctx.updateBotCommands();assert(weekApi.at(-1).payload.commands.some(x=>x.command==='week'));
 state=newState();const callsBefore=sheetCalls.length;message(state,'/miss',77,'allowed');assert.equal(sheetCalls.length,callsBefore);assert.equal(state.pending,null);
 const large={pending:{selected:Array.from({length:40},(_,i)=>'Студент'+i+' '+('Фамилия 😀'.repeat(30)))},subgroup:2};
 ctx.tgSaveState_('state',large);assert(Number(values.state_n)>1);assert.equal(JSON.stringify(ctx.tgReadState_('state')),JSON.stringify(large));ctx.tgSaveState_('state',{pending:null});assert.equal(values.state_n,'1');assert(!values.state_1);
