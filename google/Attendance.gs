@@ -17,9 +17,15 @@ function configure() {
     '\n\nХраните его в локальных настройках бота. Затем опубликуйте этот проект как веб-приложение.', ui.ButtonSet.OK);
 }
 
-function doGet() { return json_({ok:true,service:'Attendance receiver'}); }
+function doGet(e) {
+  if(e && e.parameter && e.parameter.health==='telegram') return HtmlService.createHtmlOutput('ok');
+  return json_({ok:true,service:'Attendance receiver'});
+}
 
 function doPost(e) {
+  if(e && e.parameter && e.parameter.health==='telegram') return HtmlService.createHtmlOutput('ok');
+  if(e && e.parameter && typeof e.parameter.tg_key==='string') return tgWebhook_(e);
+  if(e && typeof e.pathInfo==='string' && e.pathInfo.startsWith('telegram/')) return tgWebhook_(e);
   const lock = LockService.getScriptLock();
   try {
     if (!e || !e.postData || e.postData.contents.length > 20000) throw new Error('Некорректный запрос.');

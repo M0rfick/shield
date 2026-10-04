@@ -45,6 +45,23 @@ let apiCalls=0;values.TG_ENABLED='false';ctx.tgApi_=()=>{apiCalls++;throw new Er
 values.TG_ENABLED='true';let processed=0;
 ctx.tgApi_=(method,payload)=>{assert.equal(method,'getUpdates');assert.equal(payload.timeout,0);return payload.offset>=12?[]:[{update_id:11,message:{text:'hello',chat:{id:1,type:'private'},from:{id:42,username:'allowed'}}}];};
 ctx.tgHandle_=(m,s)=>{processed++;s.pending=null;throw new Error('Reply failed after confirmation');};ctx.pollTelegram();assert.equal(values.TG_OFFSET,'12');ctx.pollTelegram();assert.equal(processed,1);assert.equal(ctx.tgReadState_('TG_SESSION_1_42').pending,null);
+// The direct receiver requires a secret path and never replays a confirmation.
+ctx.HtmlService={createHtmlOutput:text=>({getContent:()=>text})};
+ctx.tgWebhookKey_=()=> 'private-path';ctx.constantEqual_=(a,b)=>a===b;
+values.TG_MODE='webhook';values.TG_OFFSET='12';
+const event={pathInfo:'telegram/private-path',postData:{contents:JSON.stringify({update_id:12,message:{text:'confirm',chat:{id:1,type:'private'},from:{id:42}}})}};
+let directHandled=0;ctx.tgHandle_=()=>{directHandled++;};
+ctx.tgWebhook_({...event,pathInfo:'telegram/wrong'});assert.equal(directHandled,0);
+ctx.tgWebhook_(event);ctx.tgWebhook_(event);assert.equal(directHandled,1);assert.equal(values.TG_OFFSET,'13');
+ctx.tgWebhook_({...event,postData:{contents:'invalid'}});assert.equal(directHandled,1);
+values.TG_MODE='polling';ctx.tgWebhook_({...event,postData:{contents:JSON.stringify({update_id:13})}});assert.equal(values.TG_OFFSET,'13');
+values.TG_MODE='webhook';ctx.LockService.getUserLock=()=>({tryLock:()=>false});assert.throws(()=>ctx.tgWebhook_(event),/предыдущее сообщение/);
+ctx.LockService.getUserLock=()=>({tryLock:()=>true,releaseLock:()=>{}});
+// Transport must return HTTP 200 without a redirect before enabling Telegram.
+values.TG_WEB_APP_URL='https://script.google.com/macros/s/test/exec';
+ctx.UrlFetchApp={fetch:(url,opts)=>{assert.equal(opts.followRedirects,false);return {getResponseCode:()=>302};}};
+assert.throws(()=>ctx.checkWebhookTransport(),/перенаправление/);
+ctx.UrlFetchApp.fetch=()=>({getResponseCode:()=>200});ctx.checkWebhookTransport();
 // A dated old-year file must never cover a new-year request.
 ctx.tgSnapshot_=snapshotFn;
 ctx.tgLoadSchedule_=()=>({start:'2025-10-01',lessons:[],hasGroup:true});assert.throws(()=>ctx.tgSnapshot_('2026-10-05'),/не опубликовано/);

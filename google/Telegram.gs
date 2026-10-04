@@ -50,27 +50,102 @@ function pollTelegram() {
   // Separate user lock: doPost takes its own script lock for sheet writes.
   const lock=LockService.getUserLock();if(!lock.tryLock(1))return;
   try {
+    if(p.getProperty('TG_ENABLED')!=='true')return;
     const deadline=Date.now()+45000;
     const updates=tgApi_('getUpdates',{offset:Number(p.getProperty('TG_OFFSET')||0),timeout:0,limit:30,allowed_updates:['message']});
     for(const update of updates) {
       if(Date.now()>deadline)break;
-      const m=update.message;
-      if(m&&m.chat&&m.from&&typeof m.text==='string') {
-        const key='TG_SESSION_'+m.chat.id+'_'+m.from.id;
-        const state=tgReadState_(key)||{subgroup:0,pending:null};
-        try {tgHandle_(m,state);}
-        catch(error) {
-          state.pending=null;
-          try {tgSend_(m.chat.id,String(error.message||'Ошибка обработки. Проверьте таблицу и начните заново.')+'\nНачните заново: /start',TG_MAIN);}catch(sendError){console.log('Не удалось отправить ответ Telegram.');}
-        }
-        // Advance after an uncertain reply so the same confirmation is not retried.
-        tgSaveState_(key,state);
-      }
-      p.setProperty('TG_OFFSET',String(update.update_id+1));
+      tgProcessUpdate_(update);
     }
     p.setProperty('TG_LAST_POLL',new Date().toISOString());
   } catch(error) {console.log('Проверка сообщений не завершена: '+String(error.message||'ошибка сервиса'));}
   finally {lock.releaseLock();}
+}
+
+// Shared handler for polling and direct Telegram delivery. The caller holds UserLock.
+function tgProcessUpdate_(update) {
+  const p=PropertiesService.getScriptProperties();
+  if(!update || !Number.isSafeInteger(update.update_id) || update.update_id<0)throw new Error('Неверное сообщение Telegram.');
+  // Persist before executing: a retry cannot apply the same confirmation twice.
+  const lastUpdate=Number(p.getProperty('TG_LAST_UPDATE_MS')||Date.now());
+  // Telegram can choose a new random update_id after at least a week of inactivity.
+  if(update.update_id<Number(p.getProperty('TG_OFFSET')||0) && Date.now()-lastUpdate<7*86400000)return;
+  p.setProperty('TG_OFFSET',String(update.update_id+1));
+  p.setProperty('TG_LAST_UPDATE_MS',String(Date.now()));
+  const m=update.message;
+  if(!m || !m.chat || !m.from || typeof m.text!=='string')return;
+  const key='TG_SESSION_'+m.chat.id+'_'+m.from.id,state=tgReadState_(key)||{subgroup:0,pending:null};
+  try {tgHandle_(m,state);}
+  catch(error) {
+    state.pending=null;
+    try {tgSend_(m.chat.id,String(error.message||'Ошибка обработки. Проверьте таблицу и начните заново.')+'\nНачните заново: /start',TG_MAIN);}catch(sendError){console.log('Не удалось отправить ответ Telegram.');}
+  }
+  tgSaveState_(key,state);
+}
+
+function tgWebhookKey_() {
+  const p=PropertiesService.getScriptProperties();
+  if(!p.getProperty('SHARED_SECRET') || !p.getProperty('TELEGRAM_BOT_TOKEN'))throw new Error('Подключение не настроено.');
+  return digest_('telegram-webhook|'+p.getProperty('SHARED_SECRET')+'|'+p.getProperty('TELEGRAM_BOT_TOKEN'));
+}
+
+function tgWebhook_(e) {
+  const p=PropertiesService.getScriptProperties(),ack=()=>HtmlService.createHtmlOutput('ok');
+  const supplied=e.parameter&&e.parameter.tg_key;
+  if(p.getProperty('TG_MODE')!=='webhook' || !(typeof supplied==='string'?constantEqual_(supplied,tgWebhookKey_()):constantEqual_(e.pathInfo||'','telegram/'+tgWebhookKey_())))return ack();
+  if(!e.postData || typeof e.postData.contents!=='string' || e.postData.contents.length>20000)return ack();
+  let update;try {update=JSON.parse(e.postData.contents);}catch(error){return ack();}
+  if(!Number.isSafeInteger(update.update_id) || update.update_id<0)return ack();
+  const lock=LockService.getUserLock();
+  // Throw on lock contention so Telegram retries rather than discards a new command.
+  if(!lock.tryLock(10000))throw new Error('Бот обрабатывает предыдущее сообщение.');
+  try {tgProcessUpdate_(update);p.setProperty('TG_LAST_POLL',new Date().toISOString());}
+  finally {lock.releaseLock();}
+  return ack();
+}
+
+/** Read-only transport check. Does not send messages or change Telegram settings. */
+function checkWebhookTransport() {
+  const p=PropertiesService.getScriptProperties();
+  const url=p.getProperty('TG_WEB_APP_URL')||ScriptApp.getService().getUrl();
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url||''))throw new Error('Добавьте TG_WEB_APP_URL с адресом развертывания /exec.');
+  const response=UrlFetchApp.fetch(url+'?health=telegram',{followRedirects:false,muteHttpExceptions:true});
+  const status=response.getResponseCode();
+  const post=UrlFetchApp.fetch(url+'?health=telegram',{method:'post',contentType:'application/json',payload:'{}',followRedirects:false,muteHttpExceptions:true});
+  const postStatus=post.getResponseCode();
+  console.log(JSON.stringify({httpStatus:status,postStatus,directDeliverySupported:status===200&&postStatus===200}));
+  if(status!==200||postStatus!==200)throw new Error('Google возвращает перенаправление. Прямое подключение Telegram не поддерживается для этого адреса.');
+  p.setProperty('TG_WEB_APP_URL',url);
+}
+
+function enableWebhookBot() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  checkWebhookTransport();
+  const p=PropertiesService.getScriptProperties();
+  const lock=LockService.getUserLock();if(!lock.tryLock(30000))throw new Error('Дождитесь завершения текущей обработки и повторите.');
+  try {
+    // Mark the receiver ready before registration; polling stays locked during the switch.
+    p.setProperty('TG_MODE','webhook');
+    if(!p.getProperty('TG_LAST_UPDATE_MS'))p.setProperty('TG_LAST_UPDATE_MS',String(Date.now()));
+    try {tgApi_('setWebhook',{url:p.getProperty('TG_WEB_APP_URL')+'?tg_key='+encodeURIComponent(tgWebhookKey_()),max_connections:1,allowed_updates:['message'],drop_pending_updates:false});}
+    catch(error){p.setProperty('TG_MODE','polling');throw error;}
+    p.setProperty('TG_ENABLED','false');
+    ScriptApp.getProjectTriggers().filter(x=>x.getHandlerFunction()==='pollTelegram').forEach(x=>ScriptApp.deleteTrigger(x));
+    console.log('Прямое подключение Telegram включено. Минутный таймер остановлен.');
+  } finally {lock.releaseLock();}
+}
+
+function webhookBotStatus() {
+  const info=tgApi_('getWebhookInfo',{}),p=PropertiesService.getScriptProperties();
+  console.log(JSON.stringify({mode:p.getProperty('TG_MODE')||'polling',connected:!!info.url,pending:info.pending_update_count||0,lastError:info.last_error_message||null,lastHandled:p.getProperty('TG_LAST_POLL')}));
+}
+
+function returnToPolling() {
+  const p=PropertiesService.getScriptProperties(),lock=LockService.getUserLock();
+  if(!lock.tryLock(30000))throw new Error('Дождитесь завершения текущей обработки.');
+  try {tgApi_('deleteWebhook',{drop_pending_updates:false});p.setProperty('TG_MODE','polling');}
+  finally {lock.releaseLock();}
+  enableCloudBot();
 }
 
 function cloudBotStatus() {
@@ -231,7 +306,7 @@ function tgRenderDay_(date,subgroup,force) {
 
 function tgHandle_(m,state) {
   const text=m.text.trim(),lower=text.toLowerCase(),parts=text.split(/\s+/),command=parts[0].split('@')[0].toLowerCase(),arg=text.slice(parts[0].length).trim(),chat=m.chat.id,auth=tgAuth_(m.from);
-  if(['/start','/help'].includes(command)){state.pending=null;state.scheduleDate=false;tgSend_(chat,'Расписание и посещаемость группы '+TG_GROUP+'.\nВыберите дату и пару, затем одного или нескольких студентов и причину.\n«Убрать отметку» очищает выбранную отметку.\nОблачная версия проверяет сообщения примерно раз в минуту.',TG_MAIN);return;}
+  if(['/start','/help'].includes(command)){state.pending=null;state.scheduleDate=false;tgSend_(chat,'Расписание и посещаемость группы '+TG_GROUP+'.\nВыберите дату и пару, затем одного или нескольких студентов и причину.\n«Убрать отметку» очищает выбранную отметку.\n'+(PropertiesService.getScriptProperties().getProperty('TG_MODE')==='webhook'?'Сообщения поступают напрямую из Telegram.':'Облачная версия проверяет сообщения примерно раз в минуту.'),TG_MAIN);return;}
   if(command==='/cancel'||lower==='отмена'){state.pending=null;state.scheduleDate=false;tgSend_(chat,'Действие отменено.',TG_MAIN);return;}
   const free=text.match(/^(.+?)\s*[—–-]\s*(не был|не была|пропуск|больничный|заявление|объяснительная)$/i),validFree=free&&free[1].trim().split(/\s+/).length>=2;
   const startClear=command==='/clear'||lower==='убрать отметку',startMark=command==='/miss'||lower==='отметить пропуск'||validFree;
