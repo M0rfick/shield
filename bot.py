@@ -11,11 +11,13 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from schedule import GROUP, ScheduleClient, ScheduleError, parse_date, today, date_label
 from attendance import AttendanceClient, AttendanceFlow
 
 ROOT = Path(__file__).resolve().parent
 KEYBOARD = {'keyboard': [[{'text': 'Сегодня'}, {'text': 'Завтра'}],
+                         [{'text': 'Вся неделя'}],
                          [{'text': 'Выбрать дату'}, {'text': 'Выбрать подгруппу'}],
                          [{'text': 'Отметить пропуск'}, {'text': 'Убрать отметку'}],
                          [{'text': 'Обновить'}]],
@@ -29,7 +31,7 @@ HELP = ('Привет! Показываю расписание группы ' + 
         'Пропуски: дата → предмет и пара → студент из списка → причина → подтверждение.\n\n'
         'На одной паре можно нажать «Выбрать нескольких», отметить фамилии и указать общую причину.\n\n'
         'Удаление: «Убрать отметку» → дата → пара → студент → подтверждение удаления.\n\n'
-        '/today — сегодня\n/tomorrow — завтра\n/date — выбрать дату\n'
+        '/today — сегодня\n/tomorrow — завтра\n/week — вся неделя одним сообщением\n/date — выбрать дату\n'
         '/date 05.10.2026 — выбранная дата\n/miss — отметить пропуск\n/clear — убрать отметку\n/cancel — отмена\n'
         '/subgroup — выбрать подгруппу\n/refresh — перечитать сайт\n\n'
         'Расписание обновляется при запросе, с кешем до двух минут. '
@@ -47,9 +49,23 @@ class Telegram:
         self.base = 'https://api.telegram.org/bot' + token + '/'
 
     def call(self, method, **payload):
+        headers = {'Content-Type': 'application/json'}
+        if method == 'sendDocument' and isinstance(payload.get('document'), bytes):
+            document = payload.pop('document')
+            filename = payload.pop('_filename', 'schedule.txt')
+            boundary = 'schedule-' + uuid.uuid4().hex
+            parts = []
+            for name, value in payload.items():
+                value = json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)
+                parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{filename}"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n'.encode() + document + b'\r\n')
+            parts.append(f'--{boundary}--\r\n'.encode())
+            data = b''.join(parts)
+            headers = {'Content-Type': 'multipart/form-data; boundary=' + boundary}
+        else:
+            data = json.dumps(payload).encode('utf-8')
         request = urllib.request.Request(self.base + method,
-                    data=json.dumps(payload).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'}, method='POST')
+                    data=data, headers=headers, method='POST')
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
                 result = json.load(response)
@@ -80,6 +96,14 @@ class Telegram:
                     if attempt == 2 or (exc.code and exc.code not in (429, 500, 502, 503, 504)):
                         raise
                     time.sleep(min(max(exc.retry_after, 2 ** attempt), 60))
+
+    def send_week(self, chat_id, text, start, keyboard=KEYBOARD):
+        if len(text.encode('utf-16-le')) // 2 <= 4096:
+            return self.call('sendMessage', chat_id=chat_id, text=text,
+                             reply_markup=keyboard, link_preview_options={'is_disabled': True})
+        return self.call('sendDocument', chat_id=chat_id, document=text.encode('utf-8'),
+                         _filename=f'schedule-{start:%Y-%m-%d}.txt',
+                         caption=f'Расписание на неделю с {start:%d.%m.%Y}', reply_markup=keyboard)
 
 
 def chunks(text, limit=3000):
@@ -131,6 +155,12 @@ class Bot:
             return
         try:
             day = today()
+            if command == '/week' or normalized == 'вся неделя':
+                if argument and command == '/week':
+                    day = parse_date(argument)
+                start = day - dt.timedelta(days=day.weekday())
+                self.telegram.send_week(chat, self.schedule.render_week(start, subgroup), start, KEYBOARD)
+                return
             if text.lower() == 'выбрать дату' or (command == '/date' and not argument):
                 dates = [date_label(day + dt.timedelta(days=i)) for i in range(14)]
                 keyboard = {'keyboard': [[{'text': x} for x in dates[i:i+2]] for i in range(0, len(dates), 2)], 'resize_keyboard': True}

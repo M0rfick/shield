@@ -195,11 +195,34 @@ class ScheduleClient:
         return '\n'.join(lines)
 
     def render_week(self, start, subgroup=0):
-        messages = []
-        for i in range(6):
+        start -= dt.timedelta(days=start.weekday())
+        end = start + dt.timedelta(days=6)
+        lines = [f'Расписание: {start:%d.%m.%Y} — {end:%d.%m.%Y}', f'Группа {self.group}']
+        if subgroup:
+            lines.append(f'Подгруппа {subgroup}')
+        snapshot = None
+        for i in range(7):
             day = start + dt.timedelta(days=i)
+            lines.extend(('', f'{DAYS[day.weekday()]}, {day:%d.%m.%Y}'))
             try:
-                messages.append(self.render_day(day, subgroup))
+                if not snapshot or not snapshot.covers(day):
+                    snapshot = self.snapshot_for(day)
+                lessons = [x for x in snapshot.lessons if x.date == day and
+                           (not subgroup or x.subgroup in (0, subgroup))]
+                if not lessons:
+                    lines.append('Занятий нет.')
+                for item in lessons:
+                    suffix = f' · подгр. {item.subgroup}' if item.subgroup else ''
+                    lines.append(f'{item.period} пара — {item.subject}{suffix}')
+                    campus = {'Э': 'Энгельса', 'П': 'Приморский', 'О': 'Онлайн'}.get(item.campus, item.campus)
+                    details = [x for x in (item.teacher, f'ауд. {item.room}' if item.room else '', campus) if x]
+                    if details:
+                        lines.append(' · '.join(details))
+                    if item.change in ('1', '3'):
+                        lines.append('Изменение в расписании' if item.change == '1' else 'Консультация (к)')
+                    if item.note:
+                        lines.append(item.note)
             except ScheduleError as exc:
-                messages.append(f'{DAYS[day.weekday()]}, {day:%d.%m.%Y}\n{exc}')
-        return messages
+                lines.append(str(exc))
+        lines.extend(('', BASE_URL))
+        return '\n'.join(lines)

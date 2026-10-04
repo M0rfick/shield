@@ -1,7 +1,7 @@
 import datetime as dt
 import unittest
 from unittest.mock import patch
-from bot import Bot, chunks
+from bot import Bot, Telegram, chunks
 from schedule import GROUP, MissingFile, ScheduleClient, ScheduleError, parse_date, parse_xml
 
 
@@ -20,6 +20,9 @@ class FakeTelegram:
         self.sent = []
 
     def send(self, chat_id, text, keyboard):
+        self.sent.append((chat_id, text, keyboard))
+
+    def send_week(self, chat_id, text, start, keyboard):
         self.sent.append((chat_id, text, keyboard))
 
 
@@ -123,6 +126,43 @@ class BotTests(unittest.TestCase):
         self.assertIn('Выбери кнопку', self.telegram.sent[-1][1])
         self.bot.handle({})
         self.assertEqual(len(self.telegram.sent), 1)
+
+    def test_week_is_one_reply_with_all_days_and_selected_subgroup(self):
+        self.bot.state['subgroups']['7'] = 1
+        self.message('/week 02.10.2026')
+        self.assertEqual(len(self.telegram.sent), 1)
+        text = self.telegram.sent[0][1]
+        self.assertIn('Понедельник, 28.09.2026', text)
+        self.assertIn('Воскресенье, 04.10.2026', text)
+        self.assertIn('Предмет 1', text)
+        self.assertNotIn('Предмет 2', text)
+        with patch('bot.today', return_value=dt.date(2026, 10, 4)):
+            self.message('Вся неделя')
+        self.assertEqual(self.telegram.sent[0][1], self.telegram.sent[1][1])
+
+    def test_week_keeps_year_boundary_and_unpublished_days(self):
+        client = ScheduleClient(fetcher=lambda index: fixture('2026-12-28', '2027-01-02'))
+        text = client.render_week(dt.date(2027, 1, 2))
+        self.assertIn('28.12.2026', text)
+        self.assertIn('03.01.2027', text)
+        self.assertIn('Предмет 1', text)
+        missing = client.render_week(dt.date(2027, 2, 1))
+        self.assertIn('не опубликовано', missing)
+        self.assertNotIn('Занятий нет.', missing)
+
+    def test_week_sender_never_splits_or_truncates_long_text(self):
+        telegram = Telegram('test-token')
+        calls = []
+        telegram.call = lambda method, **payload: calls.append((method, payload))
+        start = dt.date(2026, 10, 5)
+        telegram.send_week(12, 'а' * 4096, start)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[-1][0], 'sendMessage')
+        long_text = '😀' * 2049
+        telegram.send_week(12, long_text, start)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1][0], 'sendDocument')
+        self.assertEqual(calls[-1][1]['document'].decode(), long_text)
 
     def test_large_message_chunks(self):
         parts = list(chunks('а' * 7001))
